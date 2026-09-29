@@ -187,7 +187,8 @@ with st.sidebar:
     
     st.divider()
     st.header("Integrations")
-    apps_script_url = st.text_input("Google Apps Script URL", type="password", help="Paste your deployed Web App URL here.")
+    # Pulls the URL securely from .streamlit/secrets.toml so you never have to type it again
+    apps_script_url = st.secrets["APPS_SCRIPT_URL"]
 
 uploaded_file = st.file_uploader("Upload BOM File", type=["csv", "xlsx", "xls"])
 
