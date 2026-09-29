@@ -201,6 +201,11 @@ with st.sidebar:
     machining_rate = st.number_input("Machining & Labor Rate ($/hr)", value=30.0, step=5.0)
     
     st.divider()
+    st.header("Discounts & Add-Ons")
+    cleanout_hours = st.number_input("Guided Clean-Out (Hours)", value=0.0, step=1.0, help="Estimated hours for sorting and packing bins prior to the build.")
+    global_discount = st.number_input("Global Discount (%)", value=0.0, step=1.0, help="Applied to the final grand total.")
+    
+    st.divider()
     st.header("Project Settings")
     kerf = st.number_input("Blade Kerf (inches)", value=0.125, step=0.0625, format="%.3f")
     manual_assembly_hours = st.number_input("Additional Manual Assembly (Hrs)", value=2.0, step=0.5)
@@ -208,7 +213,6 @@ with st.sidebar:
     
     st.divider()
     st.header("Integrations")
-    # Using Streamlit Secrets for the Web App URL
     try:
         apps_script_url = st.secrets["APPS_SCRIPT_URL"]
         st.success("✅ Google Apps Script Connected")
@@ -287,17 +291,25 @@ if uploaded_file is not None:
         client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0 
         machining_hours = (total_1d_cuts * 30 + total_2d_cuts * 120) / 3600
         bom_hours = df_assemblies["Total_Hours"].sum() if not df_assemblies.empty else 0.0
-        total_hours = machining_hours + manual_assembly_hours + bom_hours
         
+        # Labor Math
+        build_hours = machining_hours + manual_assembly_hours + bom_hours
+        total_hours = build_hours + cleanout_hours
         base_labor = total_hours * machining_rate
+        
+        # Total Math
         subtotal = client_mat_bid + base_labor
         buffer_amount = subtotal * (quote_buffer / 100)
-        grand_total = subtotal + buffer_amount
+        pre_discount_total = subtotal + buffer_amount
+        
+        # Discount Math
+        discount_amount = pre_discount_total * (global_discount / 100)
+        grand_total = pre_discount_total - discount_amount
 
         # Added tab_ledger for the live database connection
         tab_quote, tab_docs, tab_ledger, tab_eff, tab_1d, tab_2d = st.tabs(["💰 Quote Generator", "📄 Document Gen", "📂 Active Projects", "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"])
 
-        # ==============================================================================
+       # ==============================================================================
         # TAB 1: FINANCIAL QUOTE
         # ==============================================================================
         with tab_quote:
@@ -305,12 +317,20 @@ if uploaded_file is not None:
             m1, m2, m3 = st.columns(3)
             m1.metric("Raw Lumber Cost", f"${raw_cost:.2f}")
             m2.metric(f"Client Materials (incl $25 fee)", f"${client_mat_bid:.2f}")
-            m3.metric("Est. Shop/Build Time", f"{total_hours:.1f} hrs")
+            m3.metric("Est. Total Labor Time", f"{total_hours:.1f} hrs")
             
             st.divider()
             st.subheader(f"Bidding @ ${machining_rate}/hr")
-            st.write(f"**Base Labor:** ${base_labor:.2f}")
+            st.write(f"**Build Labor ({build_hours:.1f} hrs):** ${(build_hours * machining_rate):.2f}")
+            
+            if cleanout_hours > 0:
+                st.write(f"**Guided Clean-Out ({cleanout_hours:.1f} hrs):** ${(cleanout_hours * machining_rate):.2f}")
+                
             st.write(f"**Unmeasured Consumables & Contingency ({quote_buffer}%):** +${buffer_amount:.2f}")
+            
+            if global_discount > 0:
+                st.write(f"**Discount ({global_discount}%):** -${discount_amount:.2f}")
+                
             st.success(f"**Fixed Project Investment: ${grand_total:.2f}**")
             
             st.divider()
