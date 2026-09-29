@@ -1,3 +1,4 @@
+import datetime
 import io
 import re
 import json
@@ -312,13 +313,31 @@ if uploaded_file is not None:
             st.markdown("Fill out the client details below to generate a PDF via Google Docs.")
             
             with st.form("client_doc_form"):
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 client_name = col1.text_input("Client Full Name")
                 client_email = col2.text_input("Client Email")
+                client_phone = col3.text_input("Client Phone")
+                
                 client_address = st.text_input("Installation Address")
                 project_name = st.text_input("Project Name (e.g., Garage Wall Shelving)")
                 
+                # Auto-generate a scope summary based on the parts parsed from Fusion 360
+                scope_default = "Custom heavy-duty modular garage storage using rigid 2x4 SPF framing, 3-inch structural screws, and shared-leg architecture. Includes:\n"
+                for b_name in top_level_names.values():
+                    scope_default += f"- {b_name}\n"
+                    
+                project_scope = st.text_area("Project Scope (Appears on Proposal & Contract)", value=scope_default, height=120)
+                
+                col_a, col_b = st.columns(2)
+                est_start = col_a.date_input("Estimated Start Date")
+                est_end = col_b.date_input("Estimated Completion Date")
+                
                 doc_type = st.selectbox("Document Type", ["Quote/Proposal", "Contract", "Invoice/Receipt"])
+                
+                # Only show payment method if it's a receipt
+                payment_method = "N/A"
+                if doc_type == "Invoice/Receipt":
+                    payment_method = st.selectbox("Payment Method", ["Venmo Business", "Credit Card", "ACH / Bank Transfer", "Check"])
                 
                 submit_doc = st.form_submit_button("🚀 Generate PDF & Update Ledger")
                 
@@ -327,15 +346,35 @@ if uploaded_file is not None:
                         st.error("⚠️ Please configure APPS_SCRIPT_URL in secrets.")
                     else:
                         with st.spinner(f"Generating {doc_type} for {client_name}..."):
+                            # Automated variable logic
+                            today = datetime.date.today()
+                            today_str = today.strftime("%B %d, %Y")
+                            valid_until_str = (today + datetime.timedelta(days=14)).strftime("%B %d, %Y")
+                            
+                            doc_number = f"{today.strftime('%Y%m%d')}-{client_name.split()[0].upper()[:4]}"
+                            deposit = grand_total / 2
+                            balance = grand_total - deposit
+                            
                             payload = {
                                 "client_name": client_name,
                                 "client_email": client_email,
+                                "client_phone": client_phone,
                                 "client_address": client_address,
                                 "project_name": project_name,
+                                "project_scope": project_scope,
                                 "doc_type": doc_type,
-                                "grand_total": f"${grand_total:.2f}",
-                                "deposit_amount": f"${(grand_total / 2):.2f}",
-                                "build_time": f"{total_hours:.1f} hrs"
+                                "grand_total": f"${grand_total:,.2f}",
+                                "deposit_amount": f"${deposit:,.2f}",
+                                "balance_amount": f"${balance:,.2f}",
+                                "payment_method": payment_method,
+                                "agreement_date": today_str,
+                                "payment_date": today_str,
+                                "proposal_date": today_str,
+                                "valid_until": valid_until_str,
+                                "receipt_number": doc_number,
+                                "proposal_number": doc_number,
+                                "estimated_start": est_start.strftime("%B %d, %Y"),
+                                "estimated_completion": est_end.strftime("%B %d, %Y")
                             }
                             
                             response = trigger_google_apps_script(apps_script_url, payload)
