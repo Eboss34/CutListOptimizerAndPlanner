@@ -23,81 +23,93 @@ def load_and_parse(file):
     parsed_assemblies = []
     top_level_names = {}
 
-    if name.endswith('.csv'):
-        content = file.getvalue().decode('utf-8')
-        lines = content.splitlines()
-        
-        if len(lines) > 5 and 'Part Name' in lines[5]:
-            df = pd.read_csv(io.StringIO(content), skiprows=5)
-            part_pattern = r"\[(?P<mat>[a-zA-Z][a-zA-Z0-9_]*\vert{}\d+x\d+)\]\s*(?P<label>.*?)\s*(?:-)?\s*(?P<L>\d+\.?\d*)\s*(?:x\s*(?P<W>\d+\.?\d*))?\s*$"
-            assembly_pattern = r"\[(?P<hours>\d+(?:\.\d+)?)\]\s*(?P<label>.*)"
-            idx_col = df.columns[0]
-            abs_qtys = {}
-
-            for _, row in df.iterrows():
-                item_no = str(row[idx_col]).strip()
-                if item_no == 'nan' or not item_no: continue
-                qty = float(row['Quantity']) if pd.notna(row['Quantity']) else 1.0
-                
-                if '.' in item_no:
-                    parent_no = item_no.rsplit('.', 1)[0]
-                    abs_qty = abs_qtys.get(parent_no, 1.0) * qty
-                else:
-                    abs_qty = qty
-                abs_qtys[item_no] = abs_qty
-
-                name_val = str(row['Part Name']).strip()
-                top_level_id = item_no.split('.')[0]
-
-                if item_no == top_level_id:
-                    top_level_names[top_level_id] = name_val
-
-                m_part = re.search(part_pattern, name_val)
-                m_asm = re.search(assembly_pattern, name_val)
-
-                if m_part:
-                    d = m_part.groupdict()
-                    parsed_parts.append({
-                        "Build_ID": top_level_id,
-                        "Label": d['label'].strip(),
-                        "Length": float(d['L']),
-                        "Width": float(d['W']) if d['W'] else None,
-                        "Quantity": int(abs_qty),
-                        "Material": d['mat'].strip()
-                    })
-                elif m_asm:
-                    d = m_asm.groupdict()
-                    if item_no == top_level_id:
-                        top_level_names[top_level_id] = d['label'].strip()
-                    parsed_assemblies.append({
-                        "Build_ID": top_level_id,
-                        "Label": d['label'].strip(),
-                        "Total_Hours": float(d['hours']) * abs_qty,
-                        "Quantity": int(abs_qty)
-                    })
+    # 1. Load the raw dataframe dynamically
+    try:
+        if name.endswith('.csv'):
+            content = file.getvalue().decode('utf-8')
+            lines = content.splitlines()
+            if len(lines) > 5 and 'Part Name' in lines[5]:
+                df = pd.read_csv(io.StringIO(content), skiprows=5)
+            else:
+                df = pd.read_csv(io.StringIO(content))
         else:
-            df = pd.read_csv(io.StringIO(content))
-            top_level_names['1'] = "Standard Cut List"
-            for _, row in df.iterrows():
+            df = pd.read_excel(file)
+            if 'Part Name' not in df.columns:
+                df = pd.read_excel(file, skiprows=5)
+                
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    # 2. Route to correct parsing logic based on columns
+    if 'Part Name' in df.columns:
+        # FUSION 360 BOM PARSER
+        part_pattern = r"\[(?P<mat>[a-zA-Z][a-zA-Z0-9_]*|\d+x\d+)\]\s*(?P<label>.*?)\s*(?:-)?\s*(?P<L>\d+\.?\d*)\s*(?:x\s*(?P<W>\d+\.?\d*))?\s*$"
+        assembly_pattern = r"\[(?P<hours>\d+(?:\.\d+)?)\]\s*(?P<label>.*)"
+        idx_col = df.columns[0]
+        abs_qtys = {}
+
+        for _, row in df.iterrows():
+            item_no = str(row[idx_col]).strip()
+            if item_no == 'nan' or not item_no: continue
+            qty = float(row['Quantity']) if pd.notna(row['Quantity']) else 1.0
+            
+            if '.' in item_no:
+                parent_no = item_no.rsplit('.', 1)[0]
+                abs_qty = abs_qtys.get(parent_no, 1.0) * qty
+            else:
+                abs_qty = qty
+            abs_qtys[item_no] = abs_qty
+
+            name_val = str(row['Part Name']).strip()
+            top_level_id = item_no.split('.')[0]
+
+            if item_no == top_level_id:
+                top_level_names[top_level_id] = name_val
+
+            m_part = re.search(part_pattern, name_val)
+            m_asm = re.search(assembly_pattern, name_val)
+
+            if m_part:
+                d = m_part.groupdict()
                 parsed_parts.append({
-                    "Build_ID": "1", "Label": row['Label'], "Length": float(row['Length']),
-                    "Width": float(row['Width']) if pd.notna(row.get('Width')) else None,
-                    "Quantity": int(row['Quantity']), "Material": row['Material']
+                    "Build_ID": top_level_id,
+                    "Label": d['label'].strip(),
+                    "Length": float(d['L']),
+                    "Width": float(d['W']) if d['W'] else None,
+                    "Quantity": int(abs_qty),
+                    "Material": d['mat'].strip()
+                })
+            elif m_asm:
+                d = m_asm.groupdict()
+                if item_no == top_level_id:
+                    top_level_names[top_level_id] = d['label'].strip()
+                parsed_assemblies.append({
+                    "Build_ID": top_level_id,
+                    "Label": d['label'].strip(),
+                    "Total_Hours": float(d['hours']) * abs_qty,
+                    "Quantity": int(abs_qty)
                 })
     else:
-        df = pd.read_excel(file)
+        # STANDARD CUT LIST PARSER
         top_level_names['1'] = "Standard Cut List"
         for _, row in df.iterrows():
-            parsed_parts.append({
-                "Build_ID": "1", "Label": row['Label'], "Length": float(row['Length']),
-                "Width": float(row['Width']) if pd.notna(row.get('Width')) else None,
-                "Quantity": int(row['Quantity']), "Material": row['Material']
-            })
+            try:
+                parsed_parts.append({
+                    "Build_ID": "1", 
+                    "Label": str(row.get('Label', 'Unnamed')), 
+                    "Length": float(row['Length']),
+                    "Width": float(row['Width']) if pd.notna(row.get('Width')) else None,
+                    "Quantity": int(row['Quantity']), 
+                    "Material": str(row['Material'])
+                })
+            except KeyError:
+                pass
 
     df_parts = pd.DataFrame(parsed_parts) if parsed_parts else pd.DataFrame(columns=["Build_ID", "Label", "Length", "Width", "Quantity", "Material"])
     df_asms = pd.DataFrame(parsed_assemblies) if parsed_assemblies else pd.DataFrame(columns=["Build_ID", "Label", "Total_Hours", "Quantity"])
     return df_parts, df_asms, top_level_names
-
+    
 def expand_rows(data):
     expanded = []
     for _, row in data.iterrows():
