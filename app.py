@@ -202,8 +202,14 @@ with st.sidebar:
     
     st.divider()
     st.header("Discounts & Add-Ons")
-    cleanout_hours = st.number_input("Guided Clean-Out (Hours)", value=0.0, step=1.0, help="Estimated hours for sorting and packing bins prior to the build.")
-    global_discount = st.number_input("Global Discount (%)", value=0.0, step=1.0, help="Applied to the final grand total.")
+    cleanout_hours = st.number_input("Guided Clean-Out (Hours)", value=0.0, step=1.0)
+    global_discount = st.number_input("Global Discount (%)", value=0.0, step=1.0)
+    
+    st.markdown("**Custom Line Items (Stain, Hooks, etc.)**")
+    custom_df = pd.DataFrame(columns=["Item", "Cost"])
+    edited_custom = st.data_editor(custom_df, num_rows="dynamic", hide_index=True, use_container_width=True)
+    edited_custom["Cost"] = pd.to_numeric(edited_custom["Cost"], errors='coerce').fillna(0)
+    custom_items_total = edited_custom["Cost"].sum()
     
     st.divider()
     st.header("Project Settings")
@@ -287,7 +293,7 @@ if uploaded_file is not None:
             total_2d_cuts = sum(len({round(r.x + r.width, 4) for r in s["bin"]} - {mat_settings["Sheet"]['l'] + kerf}) + 
                                 len({round(r.y + r.height, 4) for r in s["bin"]} - {mat_settings["Sheet"]['w'] + kerf}) for s in sheet_stats)
 
-        # Base Master Context Variables
+       # Base Master Context Variables
         client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0 
         machining_hours = (total_1d_cuts * 30 + total_2d_cuts * 120) / 3600
         bom_hours = df_assemblies["Total_Hours"].sum() if not df_assemblies.empty else 0.0
@@ -298,7 +304,7 @@ if uploaded_file is not None:
         base_labor = total_hours * machining_rate
         
         # Total Math
-        subtotal = client_mat_bid + base_labor
+        subtotal = client_mat_bid + base_labor + custom_items_total
         buffer_amount = subtotal * (quote_buffer / 100)
         pre_discount_total = subtotal + buffer_amount
         
@@ -309,7 +315,7 @@ if uploaded_file is not None:
         # Added tab_ledger for the live database connection
         tab_quote, tab_docs, tab_ledger, tab_eff, tab_1d, tab_2d = st.tabs(["💰 Quote Generator", "📄 Document Gen", "📂 Active Projects", "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"])
 
-       # ==============================================================================
+        # ==============================================================================
         # TAB 1: FINANCIAL QUOTE
         # ==============================================================================
         with tab_quote:
@@ -326,6 +332,9 @@ if uploaded_file is not None:
             if cleanout_hours > 0:
                 st.write(f"**Guided Clean-Out ({cleanout_hours:.1f} hrs):** ${(cleanout_hours * machining_rate):.2f}")
                 
+            if custom_items_total > 0:
+                st.write(f"**Custom Line Items:** +${custom_items_total:.2f}")
+                
             st.write(f"**Unmeasured Consumables & Contingency ({quote_buffer}%):** +${buffer_amount:.2f}")
             
             if global_discount > 0:
@@ -341,7 +350,7 @@ if uploaded_file is not None:
                     with st.expander(f"🛠️ Build: {b_name}", expanded=True):
                         st.dataframe(b_parts[["Label", "Material", "Length", "Width", "Quantity"]], use_container_width=True, hide_index=True)
 
-        # ==============================================================================
+       # ==============================================================================
         # TAB 2: DOCUMENT GENERATION
         # ==============================================================================
         with tab_docs:
@@ -357,12 +366,18 @@ if uploaded_file is not None:
                 client_address = st.text_input("Installation Address")
                 project_name = st.text_input("Project Name (e.g., Garage Wall Shelving)")
                 
-                # Auto-generate a scope summary based on the parts parsed from Fusion 360
-                scope_default = "Custom heavy-duty modular garage storage using rigid 2x4 SPF framing, 3-inch structural screws, and shared-leg architecture. Includes:\n"
+                # Auto-generate a scope summary including custom items
+                scope_default = "Custom heavy-duty modular garage storage utilizing our shared-leg architecture. Includes:\n"
                 for b_name in top_level_names.values():
                     scope_default += f"- {b_name}\n"
+                
+                valid_custom_items = [r['Item'] for _, r in edited_custom.iterrows() if pd.notna(r['Item']) and str(r['Item']).strip()]
+                if valid_custom_items:
+                    scope_default += "\nAdditional Included Materials/Services:\n"
+                    for item in valid_custom_items:
+                        scope_default += f"- {item}\n"
                     
-                project_scope = st.text_area("Project Scope (Appears on Proposal & Contract)", value=scope_default, height=120)
+                project_scope = st.text_area("Project Scope (Appears on Proposal & Contract)", value=scope_default, height=150)
                 
                 col_a, col_b = st.columns(2)
                 est_start = col_a.date_input("Estimated Start Date")
