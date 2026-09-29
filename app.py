@@ -170,10 +170,14 @@ def pack_2d(expanded_sheet, kerf, sheet_l, sheet_w, allow_rotation):
 # Webhook Handlers
 def trigger_google_apps_script(webhook_url, payload):
     try:
+        # Step 1: Send the data. Google runs doPost() and returns a redirect link to the results.
         res = requests.post(webhook_url, json=payload, allow_redirects=False)
+        
+        # Step 2: Fetch the generated PDF links from the redirect URL using GET, not POST.
         if res.status_code in (302, 303, 307, 308):
             redirect_url = res.headers.get('Location')
-            res = requests.post(redirect_url, json=payload)
+            res = requests.get(redirect_url)
+            
         res.raise_for_status()
         return res.json()
     except Exception as e:
