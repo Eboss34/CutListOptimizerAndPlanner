@@ -154,17 +154,21 @@ def pack_2d(expanded_sheet, kerf, sheet_l, sheet_w, allow_rotation):
     packer.pack()
     return list(packer), rid_map, oversize
 
-# Webhook Handler
+# Webhook Handlers
 def trigger_google_apps_script(webhook_url, payload):
     try:
-        # Step 1: Send initial POST request without following redirects
         res = requests.post(webhook_url, json=payload, allow_redirects=False)
-        
-        # Step 2: Catch Google's 302 redirect and fire a NEW post request to the redirected URL
         if res.status_code in (302, 303, 307, 308):
             redirect_url = res.headers.get('Location')
             res = requests.post(redirect_url, json=payload)
-            
+        res.raise_for_status()
+        return res.json()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def fetch_ledger_data(webhook_url):
+    try:
+        res = requests.get(webhook_url, allow_redirects=True)
         res.raise_for_status()
         return res.json()
     except Exception as e:
@@ -187,8 +191,13 @@ with st.sidebar:
     
     st.divider()
     st.header("Integrations")
-    # Pulls the URL securely from .streamlit/secrets.toml so you never have to type it again
-    apps_script_url = st.secrets["APPS_SCRIPT_URL"]
+    # Using Streamlit Secrets for the Web App URL
+    try:
+        apps_script_url = st.secrets["APPS_SCRIPT_URL"]
+        st.success("✅ Google Apps Script Connected")
+    except Exception:
+        st.error("⚠️ APPS_SCRIPT_URL missing in .streamlit/secrets.toml")
+        apps_script_url = ""
 
 uploaded_file = st.file_uploader("Upload BOM File", type=["csv", "xlsx", "xls"])
 
@@ -197,7 +206,7 @@ if uploaded_file is not None:
         df, df_assemblies, top_level_names = load_and_parse(uploaded_file)
         
         if df.empty:
-            st.warning("No cuttable parts found. Ensure parts are named like `[2x4] Leg - 84`.")
+            st.warning("No cuttable parts found.")
             st.stop()
 
         is_sheet = df["Material"].str.lower() == "sheet"
@@ -258,7 +267,7 @@ if uploaded_file is not None:
                                 len({round(r.y + r.height, 4) for r in s["bin"]} - {mat_settings["Sheet"]['w'] + kerf}) for s in sheet_stats)
 
         # Base Master Context Variables
-        client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0  # Includes $25 Consumable Fee
+        client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0 
         machining_hours = (total_1d_cuts * 30 + total_2d_cuts * 120) / 3600
         bom_hours = df_assemblies["Total_Hours"].sum() if not df_assemblies.empty else 0.0
         total_hours = machining_hours + manual_assembly_hours + bom_hours
@@ -268,7 +277,8 @@ if uploaded_file is not None:
         buffer_amount = subtotal * (quote_buffer / 100)
         grand_total = subtotal + buffer_amount
 
-        tab_quote, tab_docs, tab_eff, tab_1d, tab_2d = st.tabs(["💰 Quote Generator", "📄 Document Gen", "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"])
+        # Added tab_ledger for the live database connection
+        tab_quote, tab_docs, tab_ledger, tab_eff, tab_1d, tab_2d = st.tabs(["💰 Quote Generator", "📄 Document Gen", "📂 Active Projects", "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"])
 
         # ==============================================================================
         # TAB 1: FINANCIAL QUOTE
@@ -310,11 +320,11 @@ if uploaded_file is not None:
                 
                 doc_type = st.selectbox("Document Type", ["Quote/Proposal", "Contract", "Invoice/Receipt"])
                 
-                submit_doc = st.form_submit_button("🚀 Generate PDF")
+                submit_doc = st.form_submit_button("🚀 Generate PDF & Update Ledger")
                 
                 if submit_doc:
                     if not apps_script_url:
-                        st.error("⚠️ Please paste your Google Apps Script URL in the sidebar.")
+                        st.error("⚠️ Please configure APPS_SCRIPT_URL in secrets.")
                     else:
                         with st.spinner(f"Generating {doc_type} for {client_name}..."):
                             payload = {
@@ -325,27 +335,50 @@ if uploaded_file is not None:
                                 "doc_type": doc_type,
                                 "grand_total": f"${grand_total:.2f}",
                                 "deposit_amount": f"${(grand_total / 2):.2f}",
-                                "build_time": f"{total_hours:.1f} hrs",
-                                "parts_list": top_level_names
+                                "build_time": f"{total_hours:.1f} hrs"
                             }
                             
                             response = trigger_google_apps_script(apps_script_url, payload)
                             
                             if response.get("status") == "success":
-                                st.success(f"✅ Document Created Successfully!")
-                                st.markdown(f"[🔗 Click here to open the {doc_type}]({response.get('pdf_url')})")
+                                st.success(f"✅ Document Created & Ledger Updated!")
+                                st.markdown(f"[🔗 Open {doc_type}]({response.get('pdf_url')}) | [📂 Open Client Folder]({response.get('folder_url')})")
                             else:
                                 st.error(f"Failed to generate document: {response.get('message')}")
 
         # ==============================================================================
-        # TAB 3: EFFICIENCY (Truncated for brevity, retains original logic)
+        # TAB 3: ACTIVE PROJECTS (LEDGER)
+        # ==============================================================================
+        with tab_ledger:
+            st.header("📂 Active Projects & Ledger")
+            st.markdown("Fetch real-time data from your Google Sheet Ledger to track deposits and project statuses.")
+            
+            if st.button("🔄 Refresh Ledger Data"):
+                if not apps_script_url:
+                    st.error("⚠️ Cannot fetch data. Apps Script URL missing.")
+                else:
+                    with st.spinner("Fetching data from Google Sheets..."):
+                        ledger_response = fetch_ledger_data(apps_script_url)
+                        
+                        if ledger_response.get("status") == "success":
+                            ledger_data = ledger_response.get("data", [])
+                            if ledger_data:
+                                df_ledger = pd.DataFrame(ledger_data)
+                                st.dataframe(df_ledger, use_container_width=True)
+                            else:
+                                st.info("No active projects found in the ledger yet.")
+                        else:
+                            st.error(f"Error: {ledger_response.get('message')}")
+
+        # ==============================================================================
+        # TAB 4: EFFICIENCY
         # ==============================================================================
         with tab_eff:
             st.header("📊 Project Efficiency")
             st.metric("Total Cut Parts", int(df["Quantity"].sum()))
 
         # ==============================================================================
-        # TABS 4 & 5: DIAGRAMS (Retains original matplotlib logic)
+        # TABS 5 & 6: DIAGRAMS
         # ==============================================================================
         with tab_1d:
             st.info("Run file to process cuts.")
