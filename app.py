@@ -225,9 +225,39 @@ with st.sidebar:
     except Exception:
         st.error("⚠️ APPS_SCRIPT_URL missing in .streamlit/secrets.toml")
         apps_script_url = ""
+        
+    st.divider()
+    uploaded_file = st.file_uploader("Upload BOM File", type=["csv", "xlsx", "xls"])
 
-uploaded_file = st.file_uploader("Upload BOM File", type=["csv", "xlsx", "xls"])
+# 1. Define Tabs GLOBALLY so they always exist
+tab_ledger, tab_quote, tab_docs, tab_eff, tab_1d, tab_2d = st.tabs([
+    "📂 Active Projects", "💰 Quote Generator", "📄 Document Gen", 
+    "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"
+])
 
+# 2. Render the Ledger independently of the BOM upload
+with tab_ledger:
+    st.header("📂 Active Projects & Ledger")
+    st.markdown("Fetch real-time data from your Google Sheet Ledger to track deposits and project statuses.")
+    
+    if st.button("🔄 Refresh Ledger Data"):
+        if not apps_script_url:
+            st.error("⚠️️ Cannot fetch data. Apps Script URL missing.")
+        else:
+            with st.spinner("Fetching data from Google Sheets..."):
+                ledger_response = fetch_ledger_data(apps_script_url)
+                
+                if ledger_response.get("status") == "success":
+                    ledger_data = ledger_response.get("data", [])
+                    if ledger_data:
+                        df_ledger = pd.DataFrame(ledger_data)
+                        st.dataframe(df_ledger, use_container_width=True)
+                    else:
+                        st.info("No active projects found in the ledger yet.")
+                else:
+                    st.error(f"Error: {ledger_response.get('message')}")
+
+# 3. Process BOM if uploaded
 if uploaded_file is not None:
     try:
         df, df_assemblies, top_level_names = load_and_parse(uploaded_file)
@@ -293,7 +323,7 @@ if uploaded_file is not None:
             total_2d_cuts = sum(len({round(r.x + r.width, 4) for r in s["bin"]} - {mat_settings["Sheet"]['l'] + kerf}) + 
                                 len({round(r.y + r.height, 4) for r in s["bin"]} - {mat_settings["Sheet"]['w'] + kerf}) for s in sheet_stats)
 
-       # Base Master Context Variables
+        # Base Master Context Variables
         client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0 
         machining_hours = (total_1d_cuts * 30 + total_2d_cuts * 120) / 3600
         bom_hours = df_assemblies["Total_Hours"].sum() if not df_assemblies.empty else 0.0
@@ -311,9 +341,6 @@ if uploaded_file is not None:
         # Discount Math
         discount_amount = pre_discount_total * (global_discount / 100)
         grand_total = pre_discount_total - discount_amount
-
-        # Added tab_ledger for the live database connection
-        tab_quote, tab_docs, tab_ledger, tab_eff, tab_1d, tab_2d = st.tabs(["💰 Quote Generator", "📄 Document Gen", "📂 Active Projects", "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"])
 
         # ==============================================================================
         # TAB 1: FINANCIAL QUOTE
@@ -350,7 +377,7 @@ if uploaded_file is not None:
                     with st.expander(f"🛠️ Build: {b_name}", expanded=True):
                         st.dataframe(b_parts[["Label", "Material", "Length", "Width", "Quantity"]], use_container_width=True, hide_index=True)
 
-       # ==============================================================================
+        # ==============================================================================
         # TAB 2: DOCUMENT GENERATION
         # ==============================================================================
         with tab_docs:
@@ -385,7 +412,6 @@ if uploaded_file is not None:
                 
                 doc_type = st.selectbox("Document Type", ["Quote/Proposal", "Contract", "Invoice/Receipt"])
                 
-                # Only show payment method if it's a receipt
                 payment_method = "N/A"
                 if doc_type == "Invoice/Receipt":
                     payment_method = st.selectbox("Payment Method", ["Venmo Business", "Credit Card", "ACH / Bank Transfer", "Check"])
@@ -397,12 +423,11 @@ if uploaded_file is not None:
                         st.error("⚠️ Please configure APPS_SCRIPT_URL in secrets.")
                     else:
                         with st.spinner(f"Generating {doc_type} for {client_name}..."):
-                            # Automated variable logic
                             today = datetime.date.today()
                             today_str = today.strftime("%B %d, %Y")
                             valid_until_str = (today + datetime.timedelta(days=14)).strftime("%B %d, %Y")
                             
-                            doc_number = f"{today.strftime('%Y%m%d')}-{client_name.split()[0].upper()[:4]}"
+                            doc_number = f"{today.strftime('%Y%m%d')}-{client_name.split()[0].upper()[:4]}" if client_name else f"{today.strftime('%Y%m%d')}-0000"
                             deposit = grand_total / 2
                             balance = grand_total - deposit
                             
@@ -437,30 +462,6 @@ if uploaded_file is not None:
                                 st.error(f"Failed to generate document: {response.get('message')}")
 
         # ==============================================================================
-        # TAB 3: ACTIVE PROJECTS (LEDGER)
-        # ==============================================================================
-        with tab_ledger:
-            st.header("📂 Active Projects & Ledger")
-            st.markdown("Fetch real-time data from your Google Sheet Ledger to track deposits and project statuses.")
-            
-            if st.button("🔄 Refresh Ledger Data"):
-                if not apps_script_url:
-                    st.error("⚠️ Cannot fetch data. Apps Script URL missing.")
-                else:
-                    with st.spinner("Fetching data from Google Sheets..."):
-                        ledger_response = fetch_ledger_data(apps_script_url)
-                        
-                        if ledger_response.get("status") == "success":
-                            ledger_data = ledger_response.get("data", [])
-                            if ledger_data:
-                                df_ledger = pd.DataFrame(ledger_data)
-                                st.dataframe(df_ledger, use_container_width=True)
-                            else:
-                                st.info("No active projects found in the ledger yet.")
-                        else:
-                            st.error(f"Error: {ledger_response.get('message')}")
-
-        # ==============================================================================
         # TAB 4: EFFICIENCY
         # ==============================================================================
         with tab_eff:
@@ -477,3 +478,11 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"An error occurred while parsing the file: {e}")
+
+else:
+    with tab_quote:
+        st.info("Upload a BOM file to generate a quote.")
+    with tab_docs:
+        st.info("Upload a BOM file to generate client documents.")
+    with tab_eff:
+        st.info("Upload a BOM file to calculate efficiency.")
