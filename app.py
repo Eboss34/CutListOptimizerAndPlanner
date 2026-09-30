@@ -461,24 +461,134 @@ if uploaded_file is not None:
                             else:
                                 st.error(f"Failed to generate document: {response.get('message')}")
 
-        # ==============================================================================
+       # ==============================================================================
         # TAB 4: EFFICIENCY
         # ==============================================================================
         with tab_eff:
-            st.header("📊 Project Efficiency")
-            st.metric("Total Cut Parts", int(df["Quantity"].sum()))
+            st.header("📊 Project Efficiency & Details")
+            e1, e2 = st.columns(2)
+            e1.metric("Total Cut Parts", int(df["Quantity"].sum()))
+            e2.metric("Total Saw Passes", total_1d_cuts + total_2d_cuts)
+            
+            st.markdown("#### Material Yield")
+            for mat, bins in all_bins_1d.items():
+                if not bins: continue
+                qty = len(bins)
+                st.write(f"- **{mat} Required:** {qty} boards")
+                total_used = sum(c["length"] for b in bins for c in b["cuts"])
+                total_stock = qty * mat_settings[mat]['l']
+                eff = 100 * total_used / total_stock if total_stock else 0
+                st.write(f"  ↳ Yield: {eff:.1f}% (Waste: {100-eff:.1f}%)")
+
+            if sheet_stats:
+                qty = len(sheet_bins)
+                st.write(f"- **Sheet Required:** {qty} panels")
+                total_used = sum(s["true_area"] for s in sheet_stats)
+                total_stock = qty * (mat_settings["Sheet"]['l'] * mat_settings["Sheet"]['w'])
+                eff = 100 * total_used / total_stock if total_stock else 0
+                st.write(f"  ↳ Yield: {eff:.1f}% (Waste: {100-eff:.1f}%)")
+                
+            oversize_count = sum(len(ovs) for ovs in all_oversize_1d.values()) + len(oversize_2d)
+            if oversize_count > 0:
+                st.divider()
+                st.subheader("⚠️ Oversize Warnings")
+                for mat, ovs in all_oversize_1d.items():
+                    if ovs: st.warning(f"**{mat}** parts exceeding stock length: {', '.join(set(ovs))}")
+                if oversize_2d:
+                    st.warning(f"**Sheet** parts exceeding stock size: {', '.join(set(oversize_2d))}")
 
         # ==============================================================================
-        # TABS 5 & 6: DIAGRAMS
+        # TAB 5: 1D LUMBER DIAGRAMS
         # ==============================================================================
         with tab_1d:
-            st.info("Run file to process cuts.")
+            if any(all_bins_1d.values()):
+                st.header("🌲 1D Lumber Cut Diagrams")
+                pdf_1d_buf = io.BytesIO()
+                with PdfPages(pdf_1d_buf) as pdf_1d:
+                    for mat, bins in all_bins_1d.items():
+                        if not bins: continue
+                        
+                        st.subheader(f"{mat} Layouts")
+                        num_boards = len(bins)
+                        stock_l = mat_settings[mat]['l']
+                        
+                        fig_1d, ax_1d = plt.subplots(figsize=(10, max(2, num_boards * 0.8)))
+                        ax_1d.set_xlim(-5, stock_l + 2)
+                        ax_1d.set_ylim(0, num_boards)
+                        ax_1d.invert_yaxis()
+                        ax_1d.axis('off')
+                        ax_1d.set_title(f"{mat} (Stock: {stock_l}\")", fontweight='bold')
+                        
+                        board_height = 0.6
+                        for i, b in enumerate(bins):
+                            y_pos = i + 0.2
+                            ax_1d.add_patch(patches.Rectangle((0, y_pos), stock_l, board_height, facecolor='#e0e0e0', edgecolor='gray', lw=1))
+                            ax_1d.text(-1, y_pos + board_height / 2, f"B{i + 1}", va='center', ha='right', fontsize=10, fontweight='bold')
+
+                            current_x = 0
+                            for cut in b["cuts"]:
+                                cut_len = cut["length"]
+                                ax_1d.add_patch(patches.Rectangle((current_x, y_pos), cut_len, board_height, facecolor='burlywood', edgecolor='saddlebrown', lw=1.5))
+                                label_text = f"{cut['label']}\n({cut_len}\")" if cut_len > 12 else f"{cut_len}\""
+                                ax_1d.text(current_x + cut_len / 2, y_pos + board_height / 2, label_text, ha='center', va='center', fontsize=8, color='black', fontweight='bold')
+                                current_x += cut_len + kerf
+
+                            actual_scrap = max(0.0, b["remaining"] - kerf)
+                            if actual_scrap > 3:
+                                ax_1d.text(current_x + actual_scrap / 2, y_pos + board_height / 2, f"Scrap:\n{actual_scrap:.1f}\"", ha='center', va='center', fontsize=8, color='#555555', style='italic')
+
+                        st.pyplot(fig_1d)
+                        pdf_1d.savefig(fig_1d, bbox_inches="tight")
+                        plt.close(fig_1d)
+                
+                st.download_button("⬇️ Download All 1D Diagrams (PDF)", data=pdf_1d_buf.getvalue(), file_name="Lumber_Cut_Diagrams.pdf", mime="application/pdf")
+            else:
+                st.info("No 1D lumber parts were found in this upload.")
+
+        # ==============================================================================
+        # TAB 6: 2D SHEET DIAGRAMS
+        # ==============================================================================
         with tab_2d:
-             st.info("Run file to process cuts.")
+            if sheet_stats:
+                st.header("📐 2D Sheet Goods Diagrams")
+                cols = st.columns(2)
+                sheet_l, sheet_w = mat_settings["Sheet"]['l'], mat_settings["Sheet"]['w']
+                
+                pdf_buf = io.BytesIO()
+                with PdfPages(pdf_buf) as pdf:
+                    for i, stat in enumerate(sheet_stats):
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        ax.set_xlim(0, sheet_l)
+                        ax.set_ylim(0, sheet_w)
+                        ax.set_title(f"Sheet {i + 1}")
+                        ax.add_patch(patches.Rectangle((0, 0), sheet_l, sheet_w, fill=False, edgecolor='black', lw=3))
+
+                        for box in stat["piece_boxes"]:
+                            x, y, w, h, actual_w, actual_h = box["x"], box["y"], box["w"], box["h"], box["actual_w"], box["actual_h"]
+                            data = rid_map[box["rect_id"]]
+
+                            ax.add_patch(patches.Rectangle((x, y), w, h, facecolor='#ffcccc', edgecolor='none'))
+                            ax.add_patch(patches.Rectangle((x, y), actual_w, actual_h, facecolor='moccasin', edgecolor='saddlebrown', lw=1.5))
+                            
+                            disp_text = f"{data['label']}\n{data['l']}\" x {data['w']}\"" if abs(actual_w - data["l"]) < 0.001 else f"{data['label']}\n{data['w']}\" x {data['l']}\""
+                            ax.text(x + actual_w / 2, y + actual_h / 2, disp_text, ha='center', va='center', fontsize=9, color='black', fontweight='bold')
+
+                        yield_pct = 100 * stat["true_area"] / (sheet_l * sheet_w) if (sheet_l * sheet_w) else 0
+                        ax.text(sheet_l - 1, sheet_w - 2, f"Yield: {yield_pct:.1f}%", ha='right', va='top', fontsize=10, fontweight='bold', color='green')
+
+                        pdf.savefig(fig, bbox_inches="tight")
+                        with cols[i % 2]:
+                            st.pyplot(fig)
+                        plt.close(fig)
+                        
+                st.download_button("⬇️ Download All 2D Diagrams (PDF)", data=pdf_buf.getvalue(), file_name="Sheet_Cut_Diagrams.pdf", mime="application/pdf")
+            else:
+                st.info("No sheet parts were found in this upload.")
 
     except Exception as e:
         st.error(f"An error occurred while parsing the file: {e}")
 
+# If no file is uploaded, show these placeholders in the remaining tabs
 else:
     with tab_quote:
         st.info("Upload a BOM file to generate a quote.")
@@ -486,3 +596,7 @@ else:
         st.info("Upload a BOM file to generate client documents.")
     with tab_eff:
         st.info("Upload a BOM file to calculate efficiency.")
+    with tab_1d:
+        st.info("Upload a BOM file to view 1D lumber cuts.")
+    with tab_2d:
+        st.info("Upload a BOM file to view 2D sheet cuts.")
