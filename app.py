@@ -247,36 +247,36 @@ with tab_ledger:
                         st.rerun() # Force app to refresh UI with new data
                     else: st.error("Failed to load BOM file.")
         else: st.info("No projects with saved BOM files found in Ledger.")
-# --- NEW CODE: ATTACH BOM TO EXISTING PROJECT ---
-    st.divider()
-    st.subheader("📎 Attach BOM to Existing Project")
-    missing_bom_projects = df_ledger[df_ledger['BOM File ID'] == ""]
-    
-    if not missing_bom_projects.empty:
-        attach_target = st.selectbox("Select Project to Update:", missing_bom_projects['Client'] + " - " + missing_bom_projects['Project'], key="attach_target")
-        attach_file = st.file_uploader("Upload BOM for this project", type=["csv", "xlsx", "xls"], key="attach_file")
+    # --- NEW CODE: ATTACH BOM TO EXISTING PROJECT ---
+        st.divider()
+        st.subheader("📎 Attach BOM to Existing Project")
+        missing_bom_projects = df_ledger[df_ledger['BOM File ID'] == ""]
         
-        if st.button("Attach BOM & Save to Ledger") and attach_file:
-            target_row = missing_bom_projects[missing_bom_projects['Client'] + " - " + missing_bom_projects['Project'] == attach_target].iloc[0]
+        if not missing_bom_projects.empty:
+            attach_target = st.selectbox("Select Project to Update:", missing_bom_projects['Client'] + " - " + missing_bom_projects['Project'], key="attach_target")
+            attach_file = st.file_uploader("Upload BOM for this project", type=["csv", "xlsx", "xls"], key="attach_file")
             
-            with st.spinner("Uploading BOM to client folder..."):
-                file_bytes = attach_file.getvalue()
-                payload = {
-                    "client_name": target_row['Client'],
-                    "project_name": target_row['Project'],
-                    "doc_type": "BOM_Only",
-                    "bom_b64": base64.b64encode(file_bytes).decode('utf-8'),
-                    "bom_name": attach_file.name,
-                    "bom_mime": "text/csv" if attach_file.name.endswith('.csv') else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                }
+            if st.button("Attach BOM & Save to Ledger") and attach_file:
+                target_row = missing_bom_projects[missing_bom_projects['Client'] + " - " + missing_bom_projects['Project'] == attach_target].iloc[0]
                 
-                res = trigger_google_apps_script(apps_script_url, payload)
-                if res.get("status") == "success":
-                    st.success("✅ BOM Attached Successfully! Refresh Ledger to see it.")
-                else:
-                    st.error(f"Failed to attach BOM: {res.get('message')}")
-    else:
-        st.info("All existing projects already have a BOM attached.")    
+                with st.spinner("Uploading BOM to client folder..."):
+                    file_bytes = attach_file.getvalue()
+                    payload = {
+                        "client_name": target_row['Client'],
+                        "project_name": target_row['Project'],
+                        "doc_type": "BOM_Only",
+                        "bom_b64": base64.b64encode(file_bytes).decode('utf-8'),
+                        "bom_name": attach_file.name,
+                        "bom_mime": "text/csv" if attach_file.name.endswith('.csv') else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    }
+                    
+                    res = trigger_google_apps_script(apps_script_url, payload)
+                    if res.get("status") == "success":
+                        st.success("✅ BOM Attached Successfully! Refresh Ledger to see it.")
+                    else:
+                        st.error(f"Failed to attach BOM: {res.get('message')}")
+        else:
+            st.info("All existing projects already have a BOM attached.")    
 
 # ==============================================================================
 # CORE PROCESSING (Runs if BOM is in session state)
