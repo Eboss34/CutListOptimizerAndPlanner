@@ -2,6 +2,7 @@ import datetime
 import io
 import re
 import json
+import base64
 import requests
 import streamlit as st
 import pandas as pd
@@ -12,38 +13,32 @@ from rectpack import newPacker, guillotine
 
 st.set_page_config(page_title="Cut List & Quote Generator", layout="wide")
 st.title("🪚 Woodworking Cut List & Quoting Engine")
-st.markdown("Upload a Fusion 360 BOM (using `[Material] Label - L x W` naming) or a standard CSV.")
+st.markdown("Upload a Fusion 360 BOM, or load a past project from the Active Projects tab.")
 
 # --------------------------------------------------------------------------------------
 # Helper Functions & Parsers
 # --------------------------------------------------------------------------------------
-def load_and_parse(file):
-    name = file.name.lower()
-    parsed_parts = []
-    parsed_assemblies = []
-    top_level_names = {}
-
-    # 1. Load the raw dataframe dynamically
+def load_and_parse(file_bytes, file_name):
+    name = file_name.lower()
+    parsed_parts, parsed_assemblies, top_level_names = [], [], {}
+    
     try:
         if name.endswith('.csv'):
-            content = file.getvalue().decode('utf-8')
+            content = file_bytes.decode('utf-8')
             lines = content.splitlines()
             if len(lines) > 5 and 'Part Name' in lines[5]:
                 df = pd.read_csv(io.StringIO(content), skiprows=5)
             else:
                 df = pd.read_csv(io.StringIO(content))
         else:
-            df = pd.read_excel(file)
+            df = pd.read_excel(io.BytesIO(file_bytes))
             if 'Part Name' not in df.columns:
-                df = pd.read_excel(file, skiprows=5)
-                
+                df = pd.read_excel(io.BytesIO(file_bytes), skiprows=5)
     except Exception as e:
         st.error(f"Error reading file: {e}")
         return pd.DataFrame(), pd.DataFrame(), {}
 
-    # 2. Route to correct parsing logic based on columns
     if 'Part Name' in df.columns:
-        # FUSION 360 BOM PARSER
         part_pattern = r"\[(?P<mat>[a-zA-Z][a-zA-Z0-9_]*|\d+x\d+)\]\s*(?P<label>.*?)\s*(?:-)?\s*(?P<L>\d+\.?\d*)\s*(?:x\s*(?P<W>\d+\.?\d*))?\s*$"
         assembly_pattern = r"\[(?P<hours>\d+(?:\.\d+)?)\]\s*(?P<label>.*)"
         idx_col = df.columns[0]
@@ -63,158 +58,122 @@ def load_and_parse(file):
 
             name_val = str(row['Part Name']).strip()
             top_level_id = item_no.split('.')[0]
+            if item_no == top_level_id: top_level_names[top_level_id] = name_val
 
-            if item_no == top_level_id:
-                top_level_names[top_level_id] = name_val
-
-            m_part = re.search(part_pattern, name_val)
-            m_asm = re.search(assembly_pattern, name_val)
-
+            m_part, m_asm = re.search(part_pattern, name_val), re.search(assembly_pattern, name_val)
             if m_part:
                 d = m_part.groupdict()
-                parsed_parts.append({
-                    "Build_ID": top_level_id,
-                    "Label": d['label'].strip(),
-                    "Length": float(d['L']),
-                    "Width": float(d['W']) if d['W'] else None,
-                    "Quantity": int(abs_qty),
-                    "Material": d['mat'].strip()
-                })
+                parsed_parts.append({"Build_ID": top_level_id, "Label": d['label'].strip(), "Length": float(d['L']), "Width": float(d['W']) if d['W'] else None, "Quantity": int(abs_qty), "Material": d['mat'].strip()})
             elif m_asm:
                 d = m_asm.groupdict()
-                if item_no == top_level_id:
-                    top_level_names[top_level_id] = d['label'].strip()
-                parsed_assemblies.append({
-                    "Build_ID": top_level_id,
-                    "Label": d['label'].strip(),
-                    "Total_Hours": float(d['hours']) * abs_qty,
-                    "Quantity": int(abs_qty)
-                })
+                if item_no == top_level_id: top_level_names[top_level_id] = d['label'].strip()
+                parsed_assemblies.append({"Build_ID": top_level_id, "Label": d['label'].strip(), "Total_Hours": float(d['hours']) * abs_qty, "Quantity": int(abs_qty)})
     else:
-        # STANDARD CUT LIST PARSER
         top_level_names['1'] = "Standard Cut List"
         for _, row in df.iterrows():
             try:
-                parsed_parts.append({
-                    "Build_ID": "1", 
-                    "Label": str(row.get('Label', 'Unnamed')), 
-                    "Length": float(row['Length']),
-                    "Width": float(row['Width']) if pd.notna(row.get('Width')) else None,
-                    "Quantity": int(row['Quantity']), 
-                    "Material": str(row['Material'])
-                })
-            except KeyError:
-                pass
+                parsed_parts.append({"Build_ID": "1", "Label": str(row.get('Label', 'Unnamed')), "Length": float(row['Length']), "Width": float(row['Width']) if pd.notna(row.get('Width')) else None, "Quantity": int(row['Quantity']), "Material": str(row['Material'])})
+            except KeyError: pass
 
     df_parts = pd.DataFrame(parsed_parts) if parsed_parts else pd.DataFrame(columns=["Build_ID", "Label", "Length", "Width", "Quantity", "Material"])
     df_asms = pd.DataFrame(parsed_assemblies) if parsed_assemblies else pd.DataFrame(columns=["Build_ID", "Label", "Total_Hours", "Quantity"])
     return df_parts, df_asms, top_level_names
-    
+
 def expand_rows(data):
     expanded = []
     for _, row in data.iterrows():
-        for _ in range(int(row["Quantity"])):
-            expanded.append(row)
+        for _ in range(int(row["Quantity"])): expanded.append(row)
     return pd.DataFrame(expanded)
 
 def pack_1d(expanded_df, kerf, stock_len):
-    cuts_1d = []
-    oversize = []
+    cuts_1d, oversize = [], []
     for _, row in expanded_df.iterrows():
         cut_len = float(row["Length"])
-        if cut_len > stock_len:
-            oversize.append(str(row["Label"]))
-        else:
-            cuts_1d.append({"label": str(row["Label"]), "length": cut_len})
-
+        if cut_len > stock_len: oversize.append(str(row["Label"]))
+        else: cuts_1d.append({"label": str(row["Label"]), "length": cut_len})
+    
     cuts_1d = sorted(cuts_1d, key=lambda x: x["length"], reverse=True)
     bins = []
-    bin_capacity = stock_len + kerf
-
     for cut in cuts_1d:
-        cut_len_k = cut["length"] + kerf
-        placed = False
+        placed, cut_len_k = False, cut["length"] + kerf
         for b in bins:
             if b["remaining"] >= cut_len_k:
-                b["cuts"].append(cut)
-                b["remaining"] -= cut_len_k
-                placed = True
-                break
-        if not placed:
-            bins.append({"remaining": bin_capacity - cut_len_k, "cuts": [cut]})
-
+                b["cuts"].append(cut); b["remaining"] -= cut_len_k; placed = True; break
+        if not placed: bins.append({"remaining": (stock_len + kerf) - cut_len_k, "cuts": [cut]})
     return bins, oversize
 
 def pack_2d(expanded_sheet, kerf, sheet_l, sheet_w, allow_rotation):
     bin_w, bin_h = sheet_l + kerf, sheet_w + kerf
     packer = newPacker(pack_algo=guillotine.GuillotineBssfSas, rotation=allow_rotation)
     packer.add_bin(bin_w, bin_h, count=max(len(expanded_sheet), 1))
-
-    rid_map = {}
-    oversize = []
-    rid = 0
-
+    
+    rid_map, oversize, rid = {}, [], 0
     for _, row in expanded_sheet.iterrows():
         w_k, h_k = float(row["Length"]) + kerf, float(row["Width"]) + kerf
         if not (w_k <= bin_w and h_k <= bin_h) and not (allow_rotation and h_k <= bin_w and w_k <= bin_h):
-            oversize.append(str(row["Label"]))
-            continue
-
+            oversize.append(str(row["Label"])); continue
         packer.add_rect(w_k, h_k, rid=rid)
         rid_map[rid] = {"label": str(row["Label"]), "l": float(row["Length"]), "w": float(row["Width"])}
         rid += 1
-
+    
     packer.pack()
     return list(packer), rid_map, oversize
 
 # Webhook Handlers
 def trigger_google_apps_script(webhook_url, payload):
     try:
-        # Step 1: Send the data. Google runs doPost() and returns a redirect link to the results.
         res = requests.post(webhook_url, json=payload, allow_redirects=False)
-        
-        # Step 2: Fetch the generated PDF links from the redirect URL using GET, not POST.
         if res.status_code in (302, 303, 307, 308):
-            redirect_url = res.headers.get('Location')
-            res = requests.get(redirect_url)
-            
+            res = requests.get(res.headers.get('Location'))
         res.raise_for_status()
         return res.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
-def fetch_ledger_data(webhook_url):
+def fetch_ledger_data(webhook_url, file_id=None):
     try:
-        res = requests.get(webhook_url, allow_redirects=True)
+        url = f"{webhook_url}?action=getFile&fileId={file_id}" if file_id else webhook_url
+        res = requests.get(url, allow_redirects=True)
         res.raise_for_status()
         return res.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 # --------------------------------------------------------------------------------------
-# Application Flow
+# Session State Initialization (Memory)
+# --------------------------------------------------------------------------------------
+if 'mat_markup' not in st.session_state: st.session_state.mat_markup = 25.0
+if 'contingency' not in st.session_state: st.session_state.contingency = 10.0
+if 'labor_rate' not in st.session_state: st.session_state.labor_rate = 30.0
+if 'cleanout' not in st.session_state: st.session_state.cleanout = 0.0
+if 'discount' not in st.session_state: st.session_state.discount = 0.0
+if 'kerf' not in st.session_state: st.session_state.kerf = 0.125
+if 'manual_hrs' not in st.session_state: st.session_state.manual_hrs = 2.0
+if 'custom_df' not in st.session_state: st.session_state.custom_df = pd.DataFrame(columns=["Item", "Cost"])
+if 'bom_bytes' not in st.session_state: st.session_state.bom_bytes = None
+if 'bom_name' not in st.session_state: st.session_state.bom_name = None
+
+# --------------------------------------------------------------------------------------
+# Sidebar & Application Flow
 # --------------------------------------------------------------------------------------
 with st.sidebar:
     st.header("Financial Safeguards")
-    material_markup = st.number_input("Material Markup (%)", value=25.0, step=5.0)
-    quote_buffer = st.number_input("Unmeasured Consumables & Contingency (%)", value=10.0, step=5.0)
-    machining_rate = st.number_input("Machining & Labor Rate ($/hr)", value=30.0, step=5.0)
+    mat_markup = st.number_input("Material Markup (%)", value=st.session_state.mat_markup, step=5.0)
+    contingency = st.number_input("Unmeasured Consumables (%)", value=st.session_state.contingency, step=5.0)
+    labor_rate = st.number_input("Machining & Labor Rate ($/hr)", value=st.session_state.labor_rate, step=5.0)
     
     st.divider()
     st.header("Discounts & Add-Ons")
-    cleanout_hours = st.number_input("Guided Clean-Out (Hours)", value=0.0, step=1.0)
-    global_discount = st.number_input("Global Discount (%)", value=0.0, step=1.0)
+    cleanout = st.number_input("Guided Clean-Out (Hours)", value=st.session_state.cleanout, step=1.0)
+    discount = st.number_input("Global Discount (%)", value=st.session_state.discount, step=1.0)
     
     st.markdown("**Custom Line Items (Stain, Hooks, etc.)**")
-    custom_df = pd.DataFrame(columns=["Item", "Cost"])
-    edited_custom = st.data_editor(custom_df, num_rows="dynamic", hide_index=True, use_container_width=True)
+    edited_custom = st.data_editor(st.session_state.custom_df, num_rows="dynamic", hide_index=True, use_container_width=True)
     edited_custom["Cost"] = pd.to_numeric(edited_custom["Cost"], errors='coerce').fillna(0)
     custom_items_total = edited_custom["Cost"].sum()
     
     st.divider()
     st.header("Project Settings")
-    kerf = st.number_input("Blade Kerf (inches)", value=0.125, step=0.0625, format="%.3f")
-    manual_assembly_hours = st.number_input("Additional Manual Assembly (Hrs)", value=2.0, step=0.5)
+    kerf = st.number_input("Blade Kerf (inches)", value=st.session_state.kerf, step=0.0625, format="%.3f")
+    manual_hrs = st.number_input("Additional Manual Assembly (Hrs)", value=st.session_state.manual_hrs, step=0.5)
     allow_rotation = st.checkbox("Allow sheet parts to rotate 90°", value=True)
     
     st.divider()
@@ -223,11 +182,14 @@ with st.sidebar:
         apps_script_url = st.secrets["APPS_SCRIPT_URL"]
         st.success("✅ Google Apps Script Connected")
     except Exception:
-        st.error("⚠️ APPS_SCRIPT_URL missing in .streamlit/secrets.toml")
+        st.error("⚠️ APPS_SCRIPT_URL missing in secrets")
         apps_script_url = ""
         
     st.divider()
     uploaded_file = st.file_uploader("Upload BOM File", type=["csv", "xlsx", "xls"])
+    if uploaded_file:
+        st.session_state.bom_bytes = uploaded_file.getvalue()
+        st.session_state.bom_name = uploaded_file.name
 
 # 1. Define Tabs GLOBALLY so they always exist
 tab_ledger, tab_quote, tab_docs, tab_eff, tab_1d, tab_2d = st.tabs([
@@ -235,37 +197,64 @@ tab_ledger, tab_quote, tab_docs, tab_eff, tab_1d, tab_2d = st.tabs([
     "📊 Efficiency", "🌲 1D Cuts", "📐 2D Cuts"
 ])
 
-# 2. Render the Ledger independently of the BOM upload
+# ==============================================================================
+# TAB 1: ACTIVE PROJECTS (LOAD CAPABILITY)
+# ==============================================================================
 with tab_ledger:
     st.header("📂 Active Projects & Ledger")
-    st.markdown("Fetch real-time data from your Google Sheet Ledger to track deposits and project statuses.")
+    st.markdown("Fetch real-time data from your Google Sheet to load past quotes and files.")
     
-    if st.button("🔄 Refresh Ledger Data"):
-        if not apps_script_url:
-            st.error("⚠️️ Cannot fetch data. Apps Script URL missing.")
-        else:
-            with st.spinner("Fetching data from Google Sheets..."):
-                ledger_response = fetch_ledger_data(apps_script_url)
-                
-                if ledger_response.get("status") == "success":
-                    ledger_data = ledger_response.get("data", [])
-                    if ledger_data:
-                        df_ledger = pd.DataFrame(ledger_data)
-                        st.dataframe(df_ledger, use_container_width=True)
-                    else:
-                        st.info("No active projects found in the ledger yet.")
-                else:
-                    st.error(f"Error: {ledger_response.get('message')}")
-
-# 3. Process BOM if uploaded
-if uploaded_file is not None:
-    try:
-        df, df_assemblies, top_level_names = load_and_parse(uploaded_file)
+    if st.button("🔄 Refresh Ledger Data") and apps_script_url:
+        with st.spinner("Fetching data from Google Sheets..."):
+            res = fetch_ledger_data(apps_script_url)
+            if res.get("status") == "success":
+                st.session_state.ledger_data = res.get("data", [])
+            else: st.error(res.get("message"))
+            
+    if 'ledger_data' in st.session_state and st.session_state.ledger_data:
+        df_ledger = pd.DataFrame(st.session_state.ledger_data)
+        st.dataframe(df_ledger, use_container_width=True)
         
-        if df.empty:
-            st.warning("No cuttable parts found.")
-            st.stop()
+        st.divider()
+        st.subheader("📥 Load Past Project")
+        # Filter for rows that actually have a BOM File ID saved
+        valid_projects = df_ledger[df_ledger['BOM File ID'] != ""]
+        if not valid_projects.empty:
+            load_target = st.selectbox("Select Project to Load:", valid_projects['Client'] + " - " + valid_projects['Project'])
+            if st.button("Load Project Data & BOM"):
+                target_row = valid_projects[valid_projects['Client'] + " - " + valid_projects['Project'] == load_target].iloc[0]
+                with st.spinner("Downloading BOM and Restoring Settings..."):
+                    # 1. Restore Settings to memory
+                    try:
+                        saved_settings = json.loads(target_row['Settings JSON'])
+                        st.session_state.mat_markup = float(saved_settings.get('mat_markup', 25.0))
+                        st.session_state.contingency = float(saved_settings.get('contingency', 10.0))
+                        st.session_state.labor_rate = float(saved_settings.get('labor_rate', 30.0))
+                        st.session_state.cleanout = float(saved_settings.get('cleanout', 0.0))
+                        st.session_state.discount = float(saved_settings.get('discount', 0.0))
+                        st.session_state.kerf = float(saved_settings.get('kerf', 0.125))
+                        st.session_state.manual_hrs = float(saved_settings.get('manual_hrs', 2.0))
+                        if 'custom_df' in saved_settings:
+                            st.session_state.custom_df = pd.DataFrame(saved_settings['custom_df'])
+                    except Exception as e: 
+                        st.warning(f"Could not load all settings: {e}")
+                    
+                    # 2. Fetch BOM file from Google Drive via Apps Script
+                    bom_res = fetch_ledger_data(apps_script_url, file_id=target_row['BOM File ID'])
+                    if bom_res.get("status") == "success":
+                        st.session_state.bom_bytes = base64.b64decode(bom_res.get("bom_b64"))
+                        st.session_state.bom_name = bom_res.get("bom_name")
+                        st.rerun() # Force app to refresh UI with new data
+                    else: st.error("Failed to load BOM file.")
+        else: st.info("No projects with saved BOM files found in Ledger.")
 
+# ==============================================================================
+# CORE PROCESSING (Runs if BOM is in session state)
+# ==============================================================================
+if st.session_state.bom_bytes is not None:
+    df, df_assemblies, top_level_names = load_and_parse(st.session_state.bom_bytes, st.session_state.bom_name)
+    
+    if not df.empty:
         is_sheet = df["Material"].str.lower() == "sheet"
         df.loc[is_sheet, "Material"] = "Sheet"
         df.loc[~is_sheet, "Width"] = df.loc[~is_sheet, "Width"].fillna(0)
@@ -273,32 +262,20 @@ if uploaded_file is not None:
         with st.sidebar:
             st.header("Stock Sizing & Pricing")
             mat_settings = {}
-            unique_mats = df["Material"].unique()
-            
-            for mat in unique_mats:
+            for mat in df["Material"].unique():
                 st.subheader(f"{mat} Settings")
                 if mat == "Sheet":
-                    mat_settings[mat] = {
-                        'l': st.number_input(f"{mat} Length", value=96.0, step=1.0),
-                        'w': st.number_input(f"{mat} Width", value=48.0, step=1.0),
-                        'price': st.number_input(f"{mat} Cost ($)", value=26.0)
-                    }
+                    mat_settings[mat] = {'l': st.number_input(f"{mat} Length", value=96.0), 'w': st.number_input(f"{mat} Width", value=48.0), 'price': st.number_input(f"{mat} Cost ($)", value=26.0)}
                 else:
-                    mat_settings[mat] = {
-                        'l': st.number_input(f"{mat} Stock Length", value=96.0, step=12.0),
-                        'price': st.number_input(f"{mat} Cost ($)", value=4.50)
-                    }
+                    mat_settings[mat] = {'l': st.number_input(f"{mat} Stock Length", value=96.0, step=12.0), 'price': st.number_input(f"{mat} Cost ($)", value=4.50)}
 
-        # Pack 1D
+        # Pack 1D & 2D
         df_1d = df[~is_sheet]
         all_bins_1d, all_oversize_1d = {}, {}
         for mat in df_1d["Material"].unique():
-            mat_df = expand_rows(df_1d[df_1d["Material"] == mat])
-            bins, oversize = pack_1d(mat_df, kerf, mat_settings[mat]['l'])
-            all_bins_1d[mat] = bins
-            all_oversize_1d[mat] = oversize
+            bins, oversize = pack_1d(expand_rows(df_1d[df_1d["Material"] == mat]), kerf, mat_settings[mat]['l'])
+            all_bins_1d[mat], all_oversize_1d[mat] = bins, oversize
 
-        # Pack 2D
         df_sheet = expand_rows(df[is_sheet])
         sheet_stats, sheet_bins, rid_map, oversize_2d = [], [], {}, []
         if not df_sheet.empty:
@@ -306,67 +283,47 @@ if uploaded_file is not None:
             for bin_ in sheet_bins:
                 piece_boxes, true_area = [], 0.0
                 for rect in bin_:
-                    x, y, w, h, rect_id = rect.x, rect.y, rect.width, rect.height, rect.rid
-                    actual_w, actual_h = max(0.0, w - kerf), max(0.0, h - kerf)
-                    piece_boxes.append({"x": x, "y": y, "w": w, "h": h, "actual_w": actual_w, "actual_h": actual_h, "rect_id": rect_id})
+                    actual_w, actual_h = max(0.0, rect.width - kerf), max(0.0, rect.height - kerf)
+                    piece_boxes.append({"x": rect.x, "y": rect.y, "w": rect.width, "h": rect.height, "actual_w": actual_w, "actual_h": actual_h, "rect_id": rect.rid})
                     true_area += actual_w * actual_h
                 sheet_stats.append({"bin": bin_, "piece_boxes": piece_boxes, "true_area": true_area})
 
-        # Cost Calculations
+        # Calculations
         raw_cost, total_1d_cuts, total_2d_cuts = 0.0, 0, 0
         for mat, bins in all_bins_1d.items():
             raw_cost += len(bins) * mat_settings[mat]['price']
             total_1d_cuts += sum(max(0, len(b["cuts"]) - 1) + (1 if b["remaining"] - kerf > 1e-6 else 0) for b in bins)
-            
         if sheet_bins:
             raw_cost += len(sheet_bins) * mat_settings["Sheet"]['price']
-            total_2d_cuts = sum(len({round(r.x + r.width, 4) for r in s["bin"]} - {mat_settings["Sheet"]['l'] + kerf}) + 
-                                len({round(r.y + r.height, 4) for r in s["bin"]} - {mat_settings["Sheet"]['w'] + kerf}) for s in sheet_stats)
+            total_2d_cuts = sum(len({round(r.x + r.width, 4) for r in s["bin"]} - {mat_settings["Sheet"]['l'] + kerf}) + len({round(r.y + r.height, 4) for r in s["bin"]} - {mat_settings["Sheet"]['w'] + kerf}) for s in sheet_stats)
 
-        # Base Master Context Variables
-        client_mat_bid = (raw_cost * (1 + (material_markup / 100))) + 25.0 
+        client_mat_bid = (raw_cost * (1 + (mat_markup / 100))) + 25.0 
         machining_hours = (total_1d_cuts * 30 + total_2d_cuts * 120) / 3600
         bom_hours = df_assemblies["Total_Hours"].sum() if not df_assemblies.empty else 0.0
+        build_hours = machining_hours + manual_hrs + bom_hours
+        total_hours = build_hours + cleanout
         
-        # Labor Math
-        build_hours = machining_hours + manual_assembly_hours + bom_hours
-        total_hours = build_hours + cleanout_hours
-        base_labor = total_hours * machining_rate
-        
-        # Total Math
-        subtotal = client_mat_bid + base_labor + custom_items_total
-        buffer_amount = subtotal * (quote_buffer / 100)
-        pre_discount_total = subtotal + buffer_amount
-        
-        # Discount Math
-        discount_amount = pre_discount_total * (global_discount / 100)
+        pre_discount_total = (client_mat_bid + (total_hours * labor_rate) + custom_items_total) * (1 + (contingency / 100))
+        discount_amount = pre_discount_total * (discount / 100)
         grand_total = pre_discount_total - discount_amount
 
         # ==============================================================================
-        # TAB 1: FINANCIAL QUOTE
+        # TAB 2: FINANCIAL QUOTE
         # ==============================================================================
         with tab_quote:
-            st.header("💰 Financial Quote Generator")
+            st.header(f"💰 Quote: {st.session_state.bom_name}")
             m1, m2, m3 = st.columns(3)
             m1.metric("Raw Lumber Cost", f"${raw_cost:.2f}")
             m2.metric(f"Client Materials (incl $25 fee)", f"${client_mat_bid:.2f}")
             m3.metric("Est. Total Labor Time", f"{total_hours:.1f} hrs")
             
             st.divider()
-            st.subheader(f"Bidding @ ${machining_rate}/hr")
-            st.write(f"**Build Labor ({build_hours:.1f} hrs):** ${(build_hours * machining_rate):.2f}")
-            
-            if cleanout_hours > 0:
-                st.write(f"**Guided Clean-Out ({cleanout_hours:.1f} hrs):** ${(cleanout_hours * machining_rate):.2f}")
-                
-            if custom_items_total > 0:
-                st.write(f"**Custom Line Items:** +${custom_items_total:.2f}")
-                
-            st.write(f"**Unmeasured Consumables & Contingency ({quote_buffer}%):** +${buffer_amount:.2f}")
-            
-            if global_discount > 0:
-                st.write(f"**Discount ({global_discount}%):** -${discount_amount:.2f}")
-                
+            st.subheader(f"Bidding @ ${labor_rate}/hr")
+            st.write(f"**Build Labor ({build_hours:.1f} hrs):** ${(build_hours * labor_rate):.2f}")
+            if cleanout > 0: st.write(f"**Guided Clean-Out ({cleanout:.1f} hrs):** ${(cleanout * labor_rate):.2f}")
+            if custom_items_total > 0: st.write(f"**Custom Line Items:** +${custom_items_total:.2f}")
+            st.write(f"**Unmeasured Consumables & Contingency ({contingency}%):** +${(pre_discount_total - (pre_discount_total/(1+(contingency/100)))):.2f}")
+            if discount > 0: st.write(f"**Discount ({discount}%):** -${discount_amount:.2f}")
             st.success(f"**Fixed Project Investment: ${grand_total:.2f}**")
             
             st.divider()
@@ -378,90 +335,70 @@ if uploaded_file is not None:
                         st.dataframe(b_parts[["Label", "Material", "Length", "Width", "Quantity"]], use_container_width=True, hide_index=True)
 
         # ==============================================================================
-        # TAB 2: DOCUMENT GENERATION
+        # TAB 3: DOCUMENT GENERATION
         # ==============================================================================
         with tab_docs:
             st.header("📄 Generate Client Documents")
-            st.markdown("Fill out the client details below to generate a PDF via Google Docs.")
-            
             with st.form("client_doc_form"):
                 col1, col2, col3 = st.columns(3)
                 client_name = col1.text_input("Client Full Name")
                 client_email = col2.text_input("Client Email")
                 client_phone = col3.text_input("Client Phone")
-                
                 client_address = st.text_input("Installation Address")
                 project_name = st.text_input("Project Name (e.g., Garage Wall Shelving)")
                 
-                # Auto-generate a scope summary including custom items
                 scope_default = "Custom heavy-duty modular garage storage utilizing our shared-leg architecture. Includes:\n"
-                for b_name in top_level_names.values():
-                    scope_default += f"- {b_name}\n"
-                
+                for b_name in top_level_names.values(): scope_default += f"- {b_name}\n"
                 valid_custom_items = [r['Item'] for _, r in edited_custom.iterrows() if pd.notna(r['Item']) and str(r['Item']).strip()]
                 if valid_custom_items:
                     scope_default += "\nAdditional Included Materials/Services:\n"
-                    for item in valid_custom_items:
-                        scope_default += f"- {item}\n"
+                    for item in valid_custom_items: scope_default += f"- {item}\n"
                     
-                project_scope = st.text_area("Project Scope (Appears on Proposal & Contract)", value=scope_default, height=150)
+                project_scope = st.text_area("Project Scope", value=scope_default, height=150)
                 
                 col_a, col_b = st.columns(2)
                 est_start = col_a.date_input("Estimated Start Date")
                 est_end = col_b.date_input("Estimated Completion Date")
                 
                 doc_type = st.selectbox("Document Type", ["Quote/Proposal", "Contract", "Invoice/Receipt"])
+                payment_method = st.selectbox("Payment Method", ["Venmo Business", "Credit Card", "ACH / Bank Transfer", "Check"]) if doc_type == "Invoice/Receipt" else "N/A"
                 
-                payment_method = "N/A"
-                if doc_type == "Invoice/Receipt":
-                    payment_method = st.selectbox("Payment Method", ["Venmo Business", "Credit Card", "ACH / Bank Transfer", "Check"])
+                submit_doc = st.form_submit_button("🚀 Generate PDF, Save BOM & Update Ledger")
                 
-                submit_doc = st.form_submit_button("🚀 Generate PDF & Update Ledger")
-                
-                if submit_doc:
-                    if not apps_script_url:
-                        st.error("⚠️ Please configure APPS_SCRIPT_URL in secrets.")
-                    else:
-                        with st.spinner(f"Generating {doc_type} for {client_name}..."):
-                            today = datetime.date.today()
-                            today_str = today.strftime("%B %d, %Y")
-                            valid_until_str = (today + datetime.timedelta(days=14)).strftime("%B %d, %Y")
-                            
-                            doc_number = f"{today.strftime('%Y%m%d')}-{client_name.split()[0].upper()[:4]}" if client_name else f"{today.strftime('%Y%m%d')}-0000"
-                            deposit = grand_total / 2
-                            balance = grand_total - deposit
-                            
-                            payload = {
-                                "client_name": client_name,
-                                "client_email": client_email,
-                                "client_phone": client_phone,
-                                "client_address": client_address,
-                                "project_name": project_name,
-                                "project_scope": project_scope,
-                                "doc_type": doc_type,
-                                "grand_total": f"${grand_total:,.2f}",
-                                "deposit_amount": f"${deposit:,.2f}",
-                                "balance_amount": f"${balance:,.2f}",
-                                "payment_method": payment_method,
-                                "agreement_date": today_str,
-                                "payment_date": today_str,
-                                "proposal_date": today_str,
-                                "valid_until": valid_until_str,
-                                "receipt_number": doc_number,
-                                "proposal_number": doc_number,
-                                "estimated_start": est_start.strftime("%B %d, %Y"),
-                                "estimated_completion": est_end.strftime("%B %d, %Y")
-                            }
-                            
-                            response = trigger_google_apps_script(apps_script_url, payload)
-                            
-                            if response.get("status") == "success":
-                                st.success(f"✅ Document Created & Ledger Updated!")
-                                st.markdown(f"[🔗 Open {doc_type}]({response.get('pdf_url')}) | [📂 Open Client Folder]({response.get('folder_url')})")
-                            else:
-                                st.error(f"Failed to generate document: {response.get('message')}")
+                if submit_doc and apps_script_url:
+                    with st.spinner(f"Generating {doc_type} and saving files to Drive..."):
+                        today = datetime.date.today()
+                        doc_number = f"{today.strftime('%Y%m%d')}-{client_name.split()[0].upper()[:4]}" if client_name else f"{today.strftime('%Y%m%d')}-0000"
+                        
+                        # Bundle all sidebar settings into a JSON string for the Ledger memory
+                        settings_payload = {
+                            "mat_markup": mat_markup, "contingency": contingency, "labor_rate": labor_rate,
+                            "cleanout": cleanout, "discount": discount, "kerf": kerf, "manual_hrs": manual_hrs,
+                            "custom_df": edited_custom.to_dict('records')
+                        }
+                        
+                        payload = {
+                            "client_name": client_name, "client_email": client_email, "client_phone": client_phone,
+                            "client_address": client_address, "project_name": project_name, "project_scope": project_scope,
+                            "doc_type": doc_type, "grand_total": f"${grand_total:,.2f}", "deposit_amount": f"${(grand_total / 2):,.2f}",
+                            "balance_amount": f"${(grand_total - (grand_total / 2)):,.2f}", "payment_method": payment_method,
+                            "agreement_date": today.strftime("%B %d, %Y"), "payment_date": today.strftime("%B %d, %Y"),
+                            "proposal_date": today.strftime("%B %d, %Y"), "valid_until": (today + datetime.timedelta(days=14)).strftime("%B %d, %Y"),
+                            "receipt_number": doc_number, "proposal_number": doc_number,
+                            "estimated_start": est_start.strftime("%B %d, %Y"), "estimated_completion": est_end.strftime("%B %d, %Y"),
+                            "settings_json": json.dumps(settings_payload),
+                            "bom_b64": base64.b64encode(st.session_state.bom_bytes).decode('utf-8'),
+                            "bom_name": st.session_state.bom_name,
+                            "bom_mime": "text/csv" if st.session_state.bom_name.endswith('.csv') else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        }
+                        
+                        res = trigger_google_apps_script(apps_script_url, payload)
+                        if res.get("status") == "success":
+                            st.success("✅ Document Created, BOM Saved & Ledger Updated!")
+                            st.markdown(f"[🔗 Open {doc_type}]({res.get('pdf_url')}) | [📂 Open Client Folder]({res.get('folder_url')})")
+                        else: st.error(f"Failed to generate: {res.get('message')}")
 
-       # ==============================================================================
+        # ==============================================================================
         # TAB 4: EFFICIENCY
         # ==============================================================================
         with tab_eff:
@@ -491,7 +428,7 @@ if uploaded_file is not None:
             oversize_count = sum(len(ovs) for ovs in all_oversize_1d.values()) + len(oversize_2d)
             if oversize_count > 0:
                 st.divider()
-                st.subheader("⚠️ Oversize Warnings")
+                st.subheader("⚠️️ Oversize Warnings")
                 for mat, ovs in all_oversize_1d.items():
                     if ovs: st.warning(f"**{mat}** parts exceeding stock length: {', '.join(set(ovs))}")
                 if oversize_2d:
@@ -588,15 +525,9 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"An error occurred while parsing the file: {e}")
 
-# If no file is uploaded, show these placeholders in the remaining tabs
 else:
-    with tab_quote:
-        st.info("Upload a BOM file to generate a quote.")
-    with tab_docs:
-        st.info("Upload a BOM file to generate client documents.")
-    with tab_eff:
-        st.info("Upload a BOM file to calculate efficiency.")
-    with tab_1d:
-        st.info("Upload a BOM file to view 1D lumber cuts.")
-    with tab_2d:
-        st.info("Upload a BOM file to view 2D sheet cuts.")
+    with tab_quote: st.info("Upload a BOM or load a past project to generate a quote.")
+    with tab_docs: st.info("Upload a BOM or load a past project to generate client documents.")
+    with tab_eff: st.info("Upload a BOM or load a past project to calculate efficiency.")
+    with tab_1d: st.info("Upload a BOM or load a past project to view 1D lumber cuts.")
+    with tab_2d: st.info("Upload a BOM or load a past project to view 2D sheet cuts.")
