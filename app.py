@@ -132,10 +132,14 @@ def trigger_google_apps_script(webhook_url, payload):
 def fetch_ledger_data(webhook_url, file_id=None):
     try:
         url = f"{webhook_url}?action=getFile&fileId={file_id}" if file_id else webhook_url
-        res = requests.get(url, allow_redirects=True)
+        res = requests.get(url, allow_redirects=False)
+        if res.status_code in (302, 303, 307, 308):
+            redirect_url = res.headers.get('Location')
+            res = requests.get(redirect_url)
         res.raise_for_status()
         return res.json()
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        return {"status": "error", "message": f"Network Error: {str(e)}"}
 
 # --------------------------------------------------------------------------------------
 # Session State Initialization (Memory)
@@ -201,52 +205,50 @@ tab_ledger, tab_quote, tab_docs, tab_eff, tab_1d, tab_2d = st.tabs([
 # TAB 1: ACTIVE PROJECTS (LOAD CAPABILITY)
 # ==============================================================================
 with tab_ledger:
-    st.header("📂 Active Projects & Ledger")
-    st.markdown("Fetch real-time data from your Google Sheet to load past quotes and files.")
-    
-    if st.button("🔄 Refresh Ledger Data") and apps_script_url:
-        with st.spinner("Fetching data from Google Sheets..."):
-            res = fetch_ledger_data(apps_script_url)
-            if res.get("status") == "success":
-                st.session_state.ledger_data = res.get("data", [])
-            else: st.error(res.get("message"))
-            
-    if 'ledger_data' in st.session_state and st.session_state.ledger_data:
-        df_ledger = pd.DataFrame(st.session_state.ledger_data)
-        st.dataframe(df_ledger, use_container_width=True)
-        
-        st.divider()
-        st.subheader("📥 Load Past Project")
-        # Filter for rows that actually have a BOM File ID saved
-        valid_projects = df_ledger[df_ledger['BOM File ID'] != ""]
-        if not valid_projects.empty:
-            load_target = st.selectbox("Select Project to Load:", valid_projects['Client'] + " - " + valid_projects['Project'])
-            if st.button("Load Project Data & BOM"):
-                target_row = valid_projects[valid_projects['Client'] + " - " + valid_projects['Project'] == load_target].iloc[0]
-                with st.spinner("Downloading BOM and Restoring Settings..."):
-                    # 1. Restore Settings to memory
-                    try:
-                        saved_settings = json.loads(target_row['Settings JSON'])
-                        st.session_state.mat_markup = float(saved_settings.get('mat_markup', 25.0))
-                        st.session_state.contingency = float(saved_settings.get('contingency', 10.0))
-                        st.session_state.labor_rate = float(saved_settings.get('labor_rate', 30.0))
-                        st.session_state.cleanout = float(saved_settings.get('cleanout', 0.0))
-                        st.session_state.discount = float(saved_settings.get('discount', 0.0))
-                        st.session_state.kerf = float(saved_settings.get('kerf', 0.125))
-                        st.session_state.manual_hrs = float(saved_settings.get('manual_hrs', 2.0))
-                        if 'custom_df' in saved_settings:
-                            st.session_state.custom_df = pd.DataFrame(saved_settings['custom_df'])
-                    except Exception as e: 
-                        st.warning(f"Could not load all settings: {e}")
-                    
-                    # 2. Fetch BOM file from Google Drive via Apps Script
-                    bom_res = fetch_ledger_data(apps_script_url, file_id=target_row['BOM File ID'])
-                    if bom_res.get("status") == "success":
-                        st.session_state.bom_bytes = base64.b64decode(bom_res.get("bom_b64"))
-                        st.session_state.bom_name = bom_res.get("bom_name")
-                        st.rerun() # Force app to refresh UI with new data
-                    else: st.error("Failed to load BOM file.")
-        else: st.info("No projects with saved BOM files found in Ledger.")
+    st.subheader("📥 Load Past Project")
+        # Ensure the column exists to prevent KeyError
+        if 'BOM File ID' in df_ledger.columns:
+            valid_projects = df_ledger[df_ledger['BOM File ID'] != ""]
+            if not valid_projects.empty:
+                load_target = st.selectbox("Select Project to Load:", valid_projects['Client'] + " - " + valid_projects['Project'])
+                if st.button("Load Project Data & BOM"):
+                    target_row = valid_projects[valid_projects['Client'] + " - " + valid_projects['Project'] == load_target].iloc[0]
+                    with st.spinner("Downloading BOM and Restoring Settings..."):
+                        
+                        # 1. Restore Settings to memory safely
+                        try:
+                            # Use .get() to prevent KeyError if the column header has a typo in Google Sheets
+                            settings_str = target_row.get('Settings JSON', '{}')
+                            if pd.isna(settings_str) or not str(settings_str).strip():
+                                settings_str = '{}'
+                                
+                            saved_settings = json.loads(str(settings_str))
+                            st.session_state.mat_markup = float(saved_settings.get('mat_markup', 25.0))
+                            st.session_state.contingency = float(saved_settings.get('contingency', 10.0))
+                            st.session_state.labor_rate = float(saved_settings.get('labor_rate', 30.0))
+                            st.session_state.cleanout = float(saved_settings.get('cleanout', 0.0))
+                            st.session_state.discount = float(saved_settings.get('discount', 0.0))
+                            st.session_state.kerf = float(saved_settings.get('kerf', 0.125))
+                            st.session_state.manual_hrs = float(saved_settings.get('manual_hrs', 2.0))
+                            if 'custom_df' in saved_settings:
+                                st.session_state.custom_df = pd.DataFrame(saved_settings['custom_df'])
+                        except Exception as e: 
+                            st.warning(f"Note: Could not restore previous slider settings (Using defaults). Reason: {e}")
+                        
+                        # 2. Fetch BOM file
+                        bom_file_id = str(target_row.get('BOM File ID', '')).strip()
+                        bom_res = fetch_ledger_data(apps_script_url, file_id=bom_file_id)
+                        
+                        if bom_res.get("status") == "success":
+                            st.session_state.bom_bytes = base64.b64decode(bom_res.get("bom_b64"))
+                            st.session_state.bom_name = bom_res.get("bom_name")
+                            st.rerun() 
+                        else: 
+                            st.error(f"Failed to load BOM file. Reason: {bom_res.get('message')}")
+            else: 
+                st.info("No projects with saved BOM files found in Ledger.")
+        else:
+            st.error("Column 'BOM File ID' missing from Google Sheet Ledger.")
     # --- NEW CODE: ATTACH BOM TO EXISTING PROJECT ---
         st.divider()
         st.subheader("📎 Attach BOM to Existing Project")
