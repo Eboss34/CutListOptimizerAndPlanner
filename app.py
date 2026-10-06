@@ -335,10 +335,10 @@ if st.session_state.bom_bytes is not None:
                 piece_boxes, true_area = [], 0.0
                 for rect in bin_:
                     actual_w, actual_h = max(0.0, rect.width - kerf), max(0.0, rect.height - kerf)
-                    piece_boxes.append({"x": rect.x, "y": rect.y, "w": rect.width, "h": rect.height, "actual_w": actual_w, "actual_h": actual_h, "rect_id": rect.rid})
+                    label = rid_map[rect.rid]["label"]
+                    piece_boxes.append({"x": rect.x, "y": rect.y, "w": rect.width, "h": rect.height, "actual_w": actual_w, "actual_h": actual_h, "rect_id": rect.rid, "label": label})
                     true_area += actual_w * actual_h
                 sheet_stats.append({"bin": bin_, "piece_boxes": piece_boxes, "true_area": true_area})
-
         # Calculations
         raw_cost, total_1d_cuts, total_2d_cuts = 0.0, 0, 0
         for mat, bins in all_bins_1d.items():
@@ -482,6 +482,12 @@ if st.session_state.bom_bytes is not None:
                     for mat, bins in all_bins_1d.items():
                         if not bins: continue
                         st.subheader(f"{mat} Layouts")
+                        
+                        # Generate Key for Labels
+                        unique_labels = list({cut["label"] for b in bins for cut in b["cuts"]})
+                        label_key = {lbl: str(i+1) for i, lbl in enumerate(unique_labels)}
+                        st.markdown("**Part Key:** " + " | ".join([f"**{v}**: {k}" for k, v in label_key.items()]))
+                        
                         num_boards, stock_l = len(bins), mat_settings[mat]['l']
                         fig_1d, ax_1d = plt.subplots(figsize=(10, max(2, num_boards * 0.8)))
                         ax_1d.set_xlim(-5, stock_l + 2); ax_1d.set_ylim(0, num_boards); ax_1d.invert_yaxis(); ax_1d.axis('off')
@@ -492,18 +498,25 @@ if st.session_state.bom_bytes is not None:
                             current_x = 0
                             for cut in b["cuts"]:
                                 cut_len = cut["length"]
+                                cut_id = label_key[cut["label"]]
                                 ax_1d.add_patch(patches.Rectangle((current_x, y_pos), cut_len, 0.6, facecolor='burlywood', edgecolor='saddlebrown'))
-                                ax_1d.text(current_x + cut_len / 2, y_pos + 0.3, f"{cut_len}\"", ha='center', va='center', fontsize=8)
+                                ax_1d.text(current_x + cut_len / 2, y_pos + 0.3, f"[{cut_id}] {cut_len:g}\"", ha='center', va='center', fontsize=8)
                                 current_x += cut_len + kerf
                         st.pyplot(fig_1d)
                         pdf_1d.savefig(fig_1d, bbox_inches="tight")
                         plt.close(fig_1d)
-                st.download_button("⬇️ Download 1D Diagrams (PDF)", data=pdf_1d_buf.getvalue(), file_name="Lumber_Cuts.pdf", mime="application/pdf")
+                st.download_button("⬇️️ Download 1D Diagrams (PDF)", data=pdf_1d_buf.getvalue(), file_name="Lumber_Cuts.pdf", mime="application/pdf")
             else: st.info("No 1D lumber parts found.")
 
         with tab_2d:
             if sheet_stats:
                 st.header("📐 2D Sheet Goods Diagrams")
+                
+                # Generate Key for Labels
+                unique_labels = list({box["label"] for stat in sheet_stats for box in stat["piece_boxes"]})
+                label_key = {lbl: str(i+1) for i, lbl in enumerate(unique_labels)}
+                st.markdown("**Part Key:** " + " | ".join([f"**{v}**: {k}" for k, v in label_key.items()]))
+                
                 cols = st.columns(2)
                 sheet_l, sheet_w = mat_settings["Sheet"]['l'], mat_settings["Sheet"]['w']
                 pdf_buf = io.BytesIO()
@@ -515,6 +528,11 @@ if st.session_state.bom_bytes is not None:
                         for box in stat["piece_boxes"]:
                             ax.add_patch(patches.Rectangle((box["x"], box["y"]), box["w"], box["h"], facecolor='#ffcccc', edgecolor='none'))
                             ax.add_patch(patches.Rectangle((box["x"], box["y"]), box["actual_w"], box["actual_h"], facecolor='moccasin', edgecolor='saddlebrown', lw=1.5))
+                            
+                            cut_id = label_key[box["label"]]
+                            cx, cy = box["x"] + box["actual_w"] / 2, box["y"] + box["actual_h"] / 2
+                            ax.text(cx, cy, f"[{cut_id}]\n{box['actual_w']:g}\"x{box['actual_h']:g}\"", ha='center', va='center', fontsize=8, color='black')
+                            
                         pdf.savefig(fig, bbox_inches="tight")
                         with cols[i % 2]: st.pyplot(fig)
                         plt.close(fig)
