@@ -478,6 +478,8 @@ if st.session_state.bom_bytes is not None:
             if any(all_bins_1d.values()):
                 st.header("🌲 1D Lumber Cut Diagrams")
                 pdf_1d_buf = io.BytesIO()
+                import textwrap  # To handle line breaks in the PDF text
+                
                 with PdfPages(pdf_1d_buf) as pdf_1d:
                     for mat, bins in all_bins_1d.items():
                         if not bins: continue
@@ -486,8 +488,19 @@ if st.session_state.bom_bytes is not None:
                         # Generate Key for Labels
                         unique_labels = list({cut["label"] for b in bins for cut in b["cuts"]})
                         label_key = {lbl: str(i+1) for i, lbl in enumerate(unique_labels)}
-                        st.markdown("**Part Key:** " + " | ".join([f"**{v}**: {k}" for k, v in label_key.items()]))
                         
+                        # Display on UI
+                        st.markdown(f"**{mat} Part Key:** " + " | ".join([f"**{v}**: {k}" for k, v in label_key.items()]))
+                        
+                        # Save Key as the first page in the PDF for this material
+                        key_fig, key_ax = plt.subplots(figsize=(10, max(1.5, len(unique_labels) * 0.15)))
+                        key_ax.axis('off')
+                        key_str = f"{mat} Part Key:\n" + " | ".join([f"[{v}] {k}" for k, v in label_key.items()])
+                        key_ax.text(0, 0.5, textwrap.fill(key_str, width=100), fontsize=10, va='center', ha='left')
+                        pdf_1d.savefig(key_fig, bbox_inches="tight")
+                        plt.close(key_fig)
+                        
+                        # Plot Diagrams
                         num_boards, stock_l = len(bins), mat_settings[mat]['l']
                         fig_1d, ax_1d = plt.subplots(figsize=(10, max(2, num_boards * 0.8)))
                         ax_1d.set_xlim(-5, stock_l + 2); ax_1d.set_ylim(0, num_boards); ax_1d.invert_yaxis(); ax_1d.axis('off')
@@ -505,9 +518,8 @@ if st.session_state.bom_bytes is not None:
                         st.pyplot(fig_1d)
                         pdf_1d.savefig(fig_1d, bbox_inches="tight")
                         plt.close(fig_1d)
-                st.download_button("⬇️️ Download 1D Diagrams (PDF)", data=pdf_1d_buf.getvalue(), file_name="Lumber_Cuts.pdf", mime="application/pdf")
+                st.download_button("⬇️ Download 1D Diagrams (PDF)", data=pdf_1d_buf.getvalue(), file_name="Lumber_Cuts.pdf", mime="application/pdf")
             else: st.info("No 1D lumber parts found.")
-
         with tab_2d:
             if sheet_stats:
                 st.header("📐 2D Sheet Goods Diagrams")
@@ -520,7 +532,18 @@ if st.session_state.bom_bytes is not None:
                 cols = st.columns(2)
                 sheet_l, sheet_w = mat_settings["Sheet"]['l'], mat_settings["Sheet"]['w']
                 pdf_buf = io.BytesIO()
+                import textwrap # To handle line breaks in the PDF text
+                
                 with PdfPages(pdf_buf) as pdf:
+                    # Save Key as the first page in the PDF
+                    key_fig, key_ax = plt.subplots(figsize=(10, max(1.5, len(unique_labels) * 0.15)))
+                    key_ax.axis('off')
+                    key_str = "Sheet Goods Part Key:\n" + " | ".join([f"[{v}] {k}" for k, v in label_key.items()])
+                    key_ax.text(0, 0.5, textwrap.fill(key_str, width=100), fontsize=10, va='center', ha='left')
+                    pdf.savefig(key_fig, bbox_inches="tight")
+                    plt.close(key_fig)
+                    
+                    # Plot Diagrams
                     for i, stat in enumerate(sheet_stats):
                         fig, ax = plt.subplots(figsize=(10, 5))
                         ax.set_xlim(0, sheet_l); ax.set_ylim(0, sheet_w); ax.set_title(f"Sheet {i + 1}")
